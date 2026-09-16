@@ -182,6 +182,7 @@ label { display: block; font-size: 13px; color: #8a94a6; margin: 12px 0 6px; }
 #modalBtns { display: flex; gap: 10px; margin-top: 18px; }
 #modalBtns .btn { flex: 1; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div id="app">
@@ -217,10 +218,15 @@ label { display: block; font-size: 13px; color: #8a94a6; margin: 12px 0 6px; }
 <script>
 'use strict';
 /* ============================================================
- * 投掷组训练打卡 · 网页版
- * 纯前端单文件应用：数据存 localStorage（本浏览器本地）。
- * 业务逻辑与微信小程序版一一对应（时间统一北京时间 YYYY-MM-DD）。
+ * 投掷组训练打卡 · 网页版（Supabase 云数据库版）
+ * 数据实时同步，所有成员共享同一份数据。
  * ============================================================ */
+
+/* Supabase 客户端 */
+const sb = supabase.createClient(
+  'https://sdfvlxcetdihdsixovkf.supabase.co',
+  'sb_publishable_W2pYh6KFSMu1q-CQn-BGdQ_42TTCTQh'
+);
 
 /* ---------- 工具 ---------- */
 const $ = (sel) => document.querySelector(sel);
@@ -271,37 +277,85 @@ function formatTime(ts) {
     ' ' + pad2(t.getHours()) + ':' + pad2(t.getMinutes());
 }
 
-/* ---------- 数据层（localStorage 模拟云数据库） ---------- */
-const KEY_MEMBERS = 'tc_members';
-const KEY_CHECKINS = 'tc_checkins';
-const KEY_META = 'tc_meta';
+/* ---------- 数据层（Supabase 云数据库） ---------- */
 const KEY_ME = 'tc_me';
 const KEY_DEVICE = 'tc_deviceId';
 
-function load(k, def) {
-  try {
-    const v = localStorage.getItem(k);
-    return v ? JSON.parse(v) : def;
-  } catch (e) { return def; }
-}
-function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
-
-let members = load(KEY_MEMBERS, []);
-let checkins = load(KEY_CHECKINS, []);
-let meta = load(KEY_META, { adminPassword: 'admin123' });
+let members = [];
+let checkins = [];
 let meId = localStorage.getItem(KEY_ME) || null;
 let deviceId = localStorage.getItem(KEY_DEVICE) || (localStorage.setItem(KEY_DEVICE, uid()), localStorage.getItem(KEY_DEVICE));
 
-function persist() {
-  save(KEY_MEMBERS, members);
-  save(KEY_CHECKINS, checkins);
-  save(KEY_META, meta);
-  localStorage.setItem(KEY_ME, meId || '');
+/* 从 Supabase 加载全部数据到内存 */
+async function loadFromDB() {
+  const { data: mList } = await sb.from('members').select('*').order('createdAt');
+  members = mList || [];
+  const { data: cList } = await sb.from('checkins').select('*').order('createdAt');
+  checkins = (cList || []).map((c) => ({ ...c, dbId: c.id }));
+  // 验证 meId 是否还有效
+  if (meId && !members.find((m) => m.id === meId)) {
+    meId = null;
+    localStorage.removeItem(KEY_ME);
+  }
 }
+
+/* 同步新成员到 Supabase（返回生成的 id） */
+async function insertMember(m) {
+  const { data, error } = await sb.from('members').insert({
+    name: m.name, role: m.role, active: m.active,
+    boundBy: m.boundBy || ''
+  }).select();
+  if (error) { console.error('insertMember error', error); return null; }
+  return data[0];
+}
+
+/* 更新已有成员到 Supabase */
+async function syncMember(m) {
+  const { error } = await sb.from('members').update({
+    name: m.name, role: m.role, active: m.active,
+    boundBy: m.boundBy || '', updatedAt: new Date().toISOString()
+  }).eq('id', m.id);
+  if (error) console.error('syncMember error', error);
+}
+
+/* 同步单个打卡记录到 Supabase */
+async function syncCheckin(c) {
+  if (c.dbId) {
+    // 已有数据库记录，更新
+    const { error } = await sb.from('checkins').update({
+      status: c.status, reason: c.reason || '', modifyCount: c.modifyCount || 0,
+      updatedAt: new Date().toISOString()
+    }).eq('id', c.dbId);
+    if (error) console.error('syncCheckin error', error);
+  } else {
+    // 新记录，插入
+    const { data, error } = await sb.from('checkins').insert({
+      memberId: c.memberId, memberName: c.memberName,
+      date: c.date, weekKey: c.weekKey, status: c.status,
+      reason: c.reason || '', modifyCount: c.modifyCount || 0
+    }).select();
+    if (error) { console.error('syncCheckin error', error); return; }
+    if (data && data[0]) c.dbId = data[0].id;
+  }
+}
+
+/* 删除打卡记录 */
+async function deleteCheckinFromDB(c) {
+  if (!c.dbId) return;
+  const { error } = await sb.from('checkins').delete().eq('id', c.dbId);
+  if (error) console.error('deleteCheckin error', error);
+}
+
+/* 删除成员 */
+async function deleteMemberFromDB(id) {
+  const { error } = await sb.from('members').delete().eq('id', id);
+  if (error) console.error('deleteMember error', error);
+}
+
 const myMember = () => (meId ? members.find((m) => m.id === meId) || null : null);
 const isAdmin = () => { const m = myMember(); return !!(m && m.role === 'admin' && m.active); };
 
-/* ---------- 业务逻辑层（模拟云函数，返回 {code, ...}） ---------- */
+/* ---------- 业务逻辑层 ---------- */
 function apiLogin() {
   const m = myMember();
   return { code: 0, deviceId, isAdmin: isAdmin(), member: m ? { id: m.id, name: m.name, role: m.role, active: m.active } : null };
@@ -321,7 +375,8 @@ function apiBindMember(memberId) {
   m.boundBy = deviceId;
   m.updatedAt = Date.now();
   meId = memberId;
-  persist();
+  localStorage.setItem(KEY_ME, meId);
+  syncMember(m);
   return { code: 0, msg: '绑定成功' };
 }
 
@@ -331,7 +386,8 @@ function apiUnbindSelf() {
   m.boundBy = '';
   m.updatedAt = Date.now();
   meId = null;
-  persist();
+  localStorage.removeItem(KEY_ME);
+  syncMember(m);
   return { code: 0, msg: '已退出绑定' };
 }
 
@@ -376,25 +432,21 @@ function apiSubmitCheckin({ date, status, reason, memberId }) {
     exist.reason = reasonStr;
     exist.modifyCount = (exist.modifyCount || 0) + 1;
     exist.updatedAt = Date.now();
-    persist();
+    syncCheckin(exist);
     return { code: 0, msg: '修改成功', modified: true };
   }
 
   const doc = {
-    id: uid(),
     memberId: target.id,
     memberName: target.name,
-    boundBy: target.boundBy || '',
     date: targetDate,
     weekKey: weekKey(targetDate),
     status,
     reason: reasonStr,
-    modifyCount: 0,
-    createdAt: Date.now(),
-    updatedAt: Date.now()
+    modifyCount: 0
   };
   checkins.push(doc);
-  persist();
+  syncCheckin(doc);
   return { code: 0, msg: status === 'present' ? '打卡成功' : '已提交请假', modified: false };
 }
 
@@ -447,7 +499,7 @@ function apiGetGroupStats(today) {
 }
 
 /* ---- 管理员 ---- */
-function apiAdminMembers(action, payload) {
+async function apiAdminMembers(action, payload) {
   const me = myMember();
   const isAdm = isAdmin();
   if (!isAdm) return { code: 403, msg: '无管理员权限' };
@@ -460,13 +512,13 @@ function apiAdminMembers(action, payload) {
     if (name.length > 20) return { code: 400, msg: '姓名不能超过20字' };
     if (members.some((m) => m.name === name)) return { code: 400, msg: '已存在同名成员' };
     const doc = {
-      id: uid(), name,
+      name,
       role: payload.role === 'admin' ? 'admin' : 'member',
-      active: true, boundBy: '',
-      createdAt: Date.now(), updatedAt: Date.now()
+      active: true, boundBy: ''
     };
-    members.push(doc);
-    persist();
+    const inserted = await insertMember(doc);
+    if (!inserted) return { code: 500, msg: '添加失败' };
+    members.push(inserted);
     return { code: 0, msg: '添加成功' };
   }
 
@@ -489,7 +541,7 @@ function apiAdminMembers(action, payload) {
       m.active = payload.active;
     }
     m.updatedAt = Date.now();
-    persist();
+    syncMember(m);
     return { code: 0, msg: '保存成功' };
   }
 
@@ -499,7 +551,7 @@ function apiAdminMembers(action, payload) {
     if (m.id === me.id) return { code: 400, msg: '不能停用自己' };
     m.active = !m.active;
     m.updatedAt = Date.now();
-    persist();
+    syncMember(m);
     return { code: 0, msg: m.active ? '已启用' : '已停用' };
   }
 
@@ -509,16 +561,8 @@ function apiAdminMembers(action, payload) {
     if (m.id === me.id) return { code: 400, msg: '不能解绑自己，请先在我的页退出绑定' };
     m.boundBy = '';
     m.updatedAt = Date.now();
-    persist();
+    syncMember(m);
     return { code: 0, msg: '已解绑' };
-  }
-
-  if (action === 'setPassword') {
-    const pwd = (payload.password || '').trim();
-    if (pwd.length < 4) return { code: 400, msg: '密码至少4位' };
-    meta.adminPassword = pwd;
-    persist();
-    return { code: 0, msg: '密码已修改' };
   }
 
   return { code: 400, msg: '未知操作' };
@@ -550,15 +594,15 @@ function apiAdminRecords(action, payload) {
     r.reason = reasonStr;
     r.modifyCount = (r.modifyCount || 0) + 1;
     r.updatedAt = Date.now();
-    persist();
+    syncCheckin(r);
     return { code: 0, msg: '修改成功' };
   }
 
   if (action === 'delete') {
-    const idx = checkins.findIndex((x) => x.id === payload.id);
+    const idx = checkins.findIndex((x) => x.dbId === payload.id);
     if (idx < 0) return { code: 404, msg: '记录不存在' };
-    checkins.splice(idx, 1);
-    persist();
+    const [removed] = checkins.splice(idx, 1);
+    deleteCheckinFromDB(removed);
     return { code: 0, msg: '删除成功' };
   }
 
@@ -767,25 +811,22 @@ function renderCheckin() {
 
   // 未初始化
   if (members.length === 0) {
-    // 只有 URL 带 ?admin=init 才显示创建管理员表单，普通队员打开只看到导入名单
+    // 只有 URL 带 ?admin=init 才显示创建管理员表单
     const isAdminInit = new URLSearchParams(location.search).get('admin') === 'init';
     if (!isAdminInit) {
       return '' +
         '<div class="card">' +
           '<div class="form-title">欢迎使用投掷组训练打卡</div>' +
-          '<div class="tip" style="margin-bottom:10px">请先导入管理员发给你的成员名单 JSON 文件，然后回到首页点击自己的姓名完成绑定。</div>' +
-          '<button class="btn btn-primary" onclick="pickImportFile()">导入成员名单</button>' +
+          '<div class="tip" style="margin-bottom:10px">系统正在初始化中，请等待管理员创建账号后再访问。</div>' +
         '</div>';
     }
     return '' +
       '<div class="card">' +
         '<div class="form-title">管理员初始化</div>' +
-        '<div class="tip" style="margin-bottom:10px">你是管理员：创建一个管理员成员并绑定为当前设备身份。</div>' +
+        '<div class="tip" style="margin-bottom:10px">你是第一个使用本系统的人，请创建管理员账号。</div>' +
         '<label>管理员姓名</label><input id="initName" placeholder="如：队长" maxlength="20">' +
-        '<label>管理密码（用于在其他设备进入管理端）</label><input id="initPwd" placeholder="至少4位，默认 admin123" maxlength="20">' +
         '<div class="btn-row" style="margin-top:14px">' +
           '<button class="btn btn-primary" onclick="doInit()">创建管理员</button>' +
-          '<button class="btn btn-ghost" onclick="pickImportFile()">导入成员名单</button>' +
         '</div>' +
       '</div>';
   }
@@ -1083,8 +1124,9 @@ function renderMe() {
   if (me) {
     html += '<button class="btn btn-ghost" onclick="confirmUnbind()">退出绑定</button>';
   }
-  html += '<button class="btn btn-ghost" onclick="pickImportFile()">导入数据（接收名单/汇总记录）</button>';
-  html += '<button class="btn ' + (isAdmin() ? 'btn-primary' : 'btn-ghost') + '" onclick="enterAdmin()">管理入口</button>';
+  if (isAdmin()) {
+    html += '<button class="btn btn-primary" onclick="enterAdmin()">管理入口</button>';
+  }
   html += '</div>';
   return html;
 }
@@ -1109,33 +1151,25 @@ function confirmUnbind() {
 function enterAdmin() {
   if (isAdmin()) { state.view = 'admin'; state.adminTab = 'members'; render(); return; }
   showModal({
-    title: '管理密码',
-    body: '<input id="pwdInput" type="password" placeholder="请输入管理密码" maxlength="20">',
-    confirmText: '进入管理端',
-    onConfirm: () => {
-      const pwd = $('#pwdInput').value;
-      if (pwd !== meta.adminPassword) { toast('密码错误'); return; }
-      state.view = 'admin'; state.adminTab = 'members'; render();
-    }
+    title: '无权限',
+    body: '只有管理员设备才能进入管理端。',
+    confirmText: '知道了', showCancel: false
   });
 }
 
 /* ---- 初始化 ---- */
-function doInit() {
+async function doInit() {
   const name = $('#initName').value.trim();
-  const pwd = $('#initPwd').value.trim();
   if (!name) { toast('请输入管理员姓名'); return; }
   if (name.length > 20) { toast('姓名不能超过20字'); return; }
-  if (pwd.length < 4) { toast('管理密码至少4位'); return; }
-  const m = {
-    id: uid(), name, role: 'admin', active: true,
-    boundBy: deviceId, // 初始化即绑定当前设备，否则会出现“已绑定”与“点击绑定”矛盾的死锁
-    createdAt: Date.now(), updatedAt: Date.now()
-  };
-  members.push(m);
-  meta.adminPassword = pwd;
-  meId = m.id;
-  persist();
+  if (members.length > 0) { toast('系统已有成员，请让管理员在成员管理中添加'); return; }
+  const inserted = await insertMember({
+    name, role: 'admin', active: true, boundBy: deviceId
+  });
+  if (!inserted) { toast('初始化失败，请重试'); return; }
+  members.push(inserted);
+  meId = inserted.id;
+  localStorage.setItem(KEY_ME, meId);
   toast('初始化成功', 'success');
   render();
 }
@@ -1200,13 +1234,13 @@ function openMemberForm(id) {
         '<label><input type="radio" name="mfActive" value="false" ' + (!m.active ? 'checked' : '') + '>停用</label>' +
       '</div>' : ''),
     confirmText: '保存',
-    onConfirm: () => {
+    onConfirm: async () => {
       const name = $('#mfName').value;
       const role = document.querySelector('input[name="mfRole"]:checked').value;
       const payload = m
         ? { action: 'update', id: m.id, name, role, active: document.querySelector('input[name="mfActive"]:checked').value === 'true' }
         : { action: 'add', name, role };
-      const r = apiAdminMembers(payload.action, payload);
+      const r = await apiAdminMembers(payload.action, payload);
       if (r.code !== 0) { toast(r.msg); return; }
       toast(r.msg || '保存成功', 'success');
       render();
@@ -1347,26 +1381,16 @@ function doExport() {
 
 function renderAdminSettings() {
   return '<div class="card">' +
-    '<div class="form-title">数据分发与备份</div>' +
+    '<div class="form-title">数据备份</div>' +
     '<div class="toolbar">' +
-      '<button class="btn btn-ghost" onclick="exportRoster()">导出成员名单</button>' +
-      '<button class="btn btn-ghost" onclick="exportBackup()">导出全部数据</button>' +
+      '<button class="btn btn-ghost" onclick="exportBackup()">导出全部数据备份</button>' +
     '</div>' +
-    '<button class="btn btn-primary btn-block" onclick="pickImportFile()">导入数据（合并去重）</button>' +
     '<div class="tip" style="margin-top:10px">' +
-      '· 导出成员名单：把名单 JSON 发给队员，队员打开网页后在「我的」页导入，即可看到名单并绑定自己的姓名。' +
-      '· 导出全部数据：备份，或收集队员回传的打卡记录后汇总。' +
-      '· 导入数据：按姓名合并成员与打卡记录，同名成员和重复记录自动跳过。' +
+      '数据实时同步在云端，所有成员打开链接即可看到最新状态。导出备份仅用于数据备份。' +
     '</div>' +
-  '</div>' +
-  '<div class="card">' +
-    '<div class="form-title">管理设置</div>' +
-    '<label>修改管理密码（用于非管理员设备进入管理端）</label>' +
-    '<input id="newPwd" type="password" maxlength="20" placeholder="至少4位">' +
-    '<button class="btn btn-primary btn-block" onclick="savePassword()">保存新密码</button>' +
   '</div>' +
   '<div class="card tip">' +
-    '本网页版为纯前端应用，数据保存在当前浏览器（localStorage）中。多设备共享请使用「导出/导入」离线同步；如需实时共享同一份数据，需接入后端数据库。' +
+    '本系统使用云端数据库，所有成员共享同一份数据，打卡实时同步。' +
   '</div>';
 }
 
@@ -1424,27 +1448,18 @@ function pickImportFile() {
   importInput.click();
 }
 
-function savePassword() {
-  const pwd = $('#newPwd').value.trim();
-  const r = apiAdminMembers('setPassword', { password: pwd });
-  if (r.code !== 0) { toast(r.msg); return; }
-  $('#newPwd').value = '';
-  toast(r.msg, 'success');
-}
-
 /* ---------- 启动 ---------- */
-// 自愈：旧版本初始化管理员时漏写绑定，导致“已绑定”与“点击绑定”矛盾。
-// 若当前身份成员存在但未绑定到本设备，则自动补绑，刷新即可修复。
-function autoFixBinding() {
-  const m = myMember();
-  if (m && !m.boundBy) {
-    m.boundBy = deviceId;
-    persist();
+(async function init() {
+  $('#view').innerHTML = '<div class="empty">加载中...</div>';
+  try {
+    await loadFromDB();
+  } catch (e) {
+    $('#view').innerHTML = '<div class="empty">数据加载失败，请检查网络后刷新</div>';
+    console.error('loadFromDB error', e);
+    return;
   }
-}
-
-autoFixBinding();
-render();
+  render();
+})();
 </script>
 </body>
 </html>
