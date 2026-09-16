@@ -767,10 +767,20 @@ function renderCheckin() {
 
   // 未初始化
   if (members.length === 0) {
+    // 只有 URL 带 ?admin=init 才显示创建管理员表单，普通队员打开只看到导入名单
+    const isAdminInit = new URLSearchParams(location.search).get('admin') === 'init';
+    if (!isAdminInit) {
+      return '' +
+        '<div class="card">' +
+          '<div class="form-title">欢迎使用投掷组训练打卡</div>' +
+          '<div class="tip" style="margin-bottom:10px">请先导入管理员发给你的成员名单 JSON 文件，然后回到首页点击自己的姓名完成绑定。</div>' +
+          '<button class="btn btn-primary" onclick="pickImportFile()">导入成员名单</button>' +
+        '</div>';
+    }
     return '' +
       '<div class="card">' +
-        '<div class="form-title">首次使用</div>' +
-        '<div class="tip" style="margin-bottom:10px">你是管理员：创建一个管理员成员并绑定为当前设备身份。如果你是普通成员（已收到名单文件），请点「导入成员名单」。</div>' +
+        '<div class="form-title">管理员初始化</div>' +
+        '<div class="tip" style="margin-bottom:10px">你是管理员：创建一个管理员成员并绑定为当前设备身份。</div>' +
         '<label>管理员姓名</label><input id="initName" placeholder="如：队长" maxlength="20">' +
         '<label>管理密码（用于在其他设备进入管理端）</label><input id="initPwd" placeholder="至少4位，默认 admin123" maxlength="20">' +
         '<div class="btn-row" style="margin-top:14px">' +
