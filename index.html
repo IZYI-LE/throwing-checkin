@@ -1153,6 +1153,28 @@ function renderStats() {
     '<div class="card chip-wrap">' +
       (g.notCheckedInList.length ? g.notCheckedInList.map((x) => '<span class="chip chip-none">' + esc(x.name) + '</span>').join('') : '<div class="empty">全部已打卡</div>') +
     '</div>';
+
+  // 累计出勤排行榜（总训练次数）
+  const totalRank = members
+    .filter((m) => m.active)
+    .map((m) => {
+      const total = checkins.filter((c) => c.memberId === m.id && c.status === 'present').length;
+      return { name: m.name, count: total };
+    })
+    .filter((x) => x.count > 0)
+    .sort((a, b) => b.count - a.count);
+  html += '<div class="section-title">累计出勤排行榜 🏆</div>' +
+    '<div class="card">' +
+      (totalRank.length
+        ? totalRank.map((x, i) =>
+            '<div class="rank-item">' +
+              '<div class="rank-no ' + (i < 3 ? 'top' : '') + '">' + (i + 1) + '</div>' +
+              '<div class="rank-name">' + esc(x.name) + '</div>' +
+              '<div class="rank-count">' + x.count + ' 次</div>' +
+            '</div>').join('')
+        : '<div class="empty">暂无出勤记录</div>') +
+    '</div>';
+
   html += '<div class="section-title">本周出勤排行榜</div>' +
     '<div class="card">' +
       (g.weekRank.length
@@ -1486,9 +1508,10 @@ function renderAdminSettings() {
     '<div class="form-title">数据备份</div>' +
     '<div class="toolbar">' +
       '<button class="btn btn-ghost" onclick="exportBackup()">导出全部数据备份</button>' +
+      '<button class="btn btn-primary" onclick="exportMemberStats()">📊 导出成员统计汇总</button>' +
     '</div>' +
     '<div class="tip" style="margin-top:10px">' +
-      '数据实时同步在云端，所有成员打开链接即可看到最新状态。导出备份仅用于数据备份。' +
+      '数据实时同步在云端，所有成员打开链接即可看到最新状态。导出备份仅用于数据备份。导出汇总表可直接用 Excel 打开。' +
     '</div>' +
   '</div>' +
   '<div class="card">' +
@@ -1503,6 +1526,28 @@ function renderAdminSettings() {
   '<div class="card tip">' +
     '本系统使用云端数据库，所有成员共享同一份数据，打卡实时同步。' +
   '</div>';
+}
+
+/* 导出成员统计汇总 CSV */
+function exportMemberStats() {
+  let csv = '﻿姓名,角色,状态,总出勤次数,总请假次数,累计未打卡天数,生命值\n';
+  members.forEach((m) => {
+    const totalPresent = checkins.filter((c) => c.memberId === m.id && c.status === 'present').length;
+    const totalAbsent = checkins.filter((c) => c.memberId === m.id && c.status === 'absent').length;
+    const missDays = getMissStreak(m.id);
+    const hp = getHp(m.id);
+    const roleText = m.role === 'admin' ? '管理员' : '成员';
+    const activeText = m.active ? '启用' : '停用';
+    csv += m.name + ',' + roleText + ',' + activeText + ',' + totalPresent + ',' + totalAbsent + ',' + missDays + ',' + hp + '\n';
+  });
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '成员训练统计_' + beijingDate() + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
+  toast('已导出 ' + members.length + ' 名成员统计', 'success');
 }
 
 function resetAllData() {
