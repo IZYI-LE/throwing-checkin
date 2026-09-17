@@ -323,7 +323,7 @@ function formatDate(d) {
   return y + '-' + m + '-' + day;
 }
 
-/* 计算累计未打卡次数：从最早记录日期到昨天，总天数 - 来训练天数 */
+/* 计算累计未打卡次数：从最早记录日期到昨天，总天数 - 有打卡记录的天数（不管来不来） */
 function getMissStreak(memberId) {
   if (checkins.length === 0) return 0;
   // 找最早的打卡日期
@@ -335,12 +335,15 @@ function getMissStreak(memberId) {
   yesterday.setDate(yesterday.getDate() - 1);
   const totalDays = Math.floor((yesterday - start) / (1000 * 60 * 60 * 24)) + 1;
   if (totalDays <= 0) return 0;
-  // 该成员来训练的次数
-  const presentCount = checkins.filter((c) => c.memberId === memberId && c.status === 'present').length;
-  return Math.max(0, totalDays - presentCount);
+  // 该成员有打卡记录的天数（不管 present 还是 absent）
+  const hasRecordDays = new Set(
+    checkins.filter((c) => c.memberId === memberId).map((c) => c.date)
+  ).size;
+  // 未打卡天数 = 总天数 - 有记录的天数
+  return Math.max(0, totalDays - hasRecordDays);
 }
 
-/* 实时计算生命值：100 - 累计未打卡次数 × 10 */
+/* 实时计算生命值：100 - 累计未打卡天数 × 10 */
 function getHp(memberId) {
   const miss = getMissStreak(memberId);
   return Math.max(0, 100 - miss * 10);
