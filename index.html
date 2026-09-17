@@ -74,6 +74,7 @@ label { display: block; font-size: 13px; color: #8a94a6; margin: 12px 0 6px; }
   box-shadow: 0 2px 8px rgba(31,45,61,.06); cursor: pointer;
 }
 .member-card.off { opacity: .55; }
+.member-card.hp-low { border: 2px solid #ff4d4f; background: #fff2f0; }
 .mc-name { font-size: 16px; font-weight: 600; }
 .mc-status { margin-top: 6px; font-size: 13px; }
 .mc-status.ok { color: #1fa755; }
@@ -82,6 +83,12 @@ label { display: block; font-size: 13px; color: #8a94a6; margin: 12px 0 6px; }
 .mc-action { font-size: 14px; flex-shrink: 0; }
 .mc-action.go { color: #1e6fff; font-weight: 600; }
 .mc-action.bind { color: #ff7a1a; }
+.hp-bar { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
+.hp-label { color: #ff4d4f; font-weight: 600; }
+.hp-progress { flex: 1; height: 8px; background: #f0f2f5; border-radius: 4px; overflow: hidden; }
+.hp-fill { height: 100%; background: linear-gradient(90deg, #52c41a, #a0d911); border-radius: 4px; transition: width .3s; }
+.hp-low .hp-fill { background: linear-gradient(90deg, #ff4d4f, #ff7875); }
+.hp-num { color: #666; min-width: 24px; text-align: right; }
 
 /* ========== 打卡页 ========== */
 .back-bar { display: inline-flex; align-items: center; color: #1e6fff; font-size: 14px; cursor: pointer; margin-bottom: 10px; }
@@ -297,13 +304,56 @@ async function loadFromDB() {
     meId = null;
     localStorage.removeItem(KEY_ME);
   }
+  // 检查并扣除未打卡生命值
+  await checkAndDeductHp();
+}
+
+/* 检查并扣除未打卡生命值 */
+async function checkAndDeductHp() {
+  const today = beijingDate();
+  const now = new Date();
+  const hour = now.getHours();
+  // 只在晚上10点后检查
+  if (hour < 22) return;
+  // 检查今天是否已经扣过血
+  const { data: config } = await sb.from('config').select('*').eq('key', 'lastHpDate').single();
+  if (config && config.value === today) return; // 今天已经扣过了
+
+  // 给所有活跃成员扣血：今天没打卡（没有记录）或者请假，都扣10点
+  const todayCheckins = checkins.filter((c) => c.date === today);
+  const todayMap = {};
+  todayCheckins.forEach((c) => { todayMap[c.memberId] = c; });
+
+  let deductedCount = 0;
+  for (const m of members) {
+    if (!m.active) continue;
+    const rec = todayMap[m.id];
+    // 今天没打卡 或者 请假，都扣10点
+    if (!rec || rec.status !== 'present') {
+      const currentHp = m.hp !== undefined ? m.hp : 100;
+      m.hp = Math.max(0, currentHp - 10);
+      await syncMember(m);
+      deductedCount++;
+    }
+  }
+
+  // 记录今天已经扣过血
+  if (config) {
+    await sb.from('config').update({ value: today }).eq('key', 'lastHpDate');
+  } else {
+    await sb.from('config').insert({ key: 'lastHpDate', value: today });
+  }
+
+  if (deductedCount > 0) {
+    console.log('已扣除', deductedCount, '名成员生命值');
+  }
 }
 
 /* 同步新成员到 Supabase（返回生成的 id） */
 async function insertMember(m) {
   const { data, error } = await sb.from('members').insert({
     name: m.name, role: m.role, active: m.active,
-    boundBy: m.boundBy || ''
+    boundBy: m.boundBy || '', hp: m.hp !== undefined ? m.hp : 100
   }).select();
   if (error) { console.error('insertMember error', error); return null; }
   return data[0];
@@ -311,10 +361,12 @@ async function insertMember(m) {
 
 /* 更新已有成员到 Supabase */
 async function syncMember(m) {
-  const { error } = await sb.from('members').update({
+  const updateData = {
     name: m.name, role: m.role, active: m.active,
     boundBy: m.boundBy || '', updatedAt: new Date().toISOString()
-  }).eq('id', m.id);
+  };
+  if (m.hp !== undefined) updateData.hp = m.hp;
+  const { error } = await sb.from('members').update(updateData).eq('id', m.id);
   if (error) console.error('syncMember error', error);
 }
 
@@ -353,7 +405,11 @@ async function deleteMemberFromDB(id) {
 }
 
 const myMember = () => (meId ? members.find((m) => m.id === meId) || null : null);
-const isAdmin = () => { const m = myMember(); return !!(m && m.role === 'admin' && m.active); };
+const isAdmin = () => {
+  if (sessionStorage.getItem('adminMode') === '1') return true;
+  const m = myMember();
+  return !!(m && m.role === 'admin' && m.active);
+};
 
 /* ---------- 业务逻辑层 ---------- */
 function apiLogin() {
@@ -867,16 +923,19 @@ function renderMemberList(all) {
   list.forEach((m) => {
     const stText = m.status === 'present' ? '已来训练' : m.status === 'absent' ? '已请假' : '未打卡';
     const stCls = m.status === 'present' ? 'ok' : m.status === 'absent' ? 'warn' : 'none';
+    const hp = m.hp !== undefined ? m.hp : 100;
+    const hpCls = hp < 60 ? 'hp-low' : '';
     let action = '';
     if (isBoundByThisDevice(m)) action = '<span class="mc-action go">去打卡 ›</span>';
     else action = '<span class="mc-action bind">点击绑定</span>';
     html +=
-      '<div class="member-card ' + (m.active ? '' : 'off') + '" onclick="openMember(\'' + m.id + '\')">' +
+      '<div class="member-card ' + (m.active ? '' : 'off') + ' ' + hpCls + '" onclick="openMember(\'' + m.id + '\')">' +
         '<div>' +
           '<span class="mc-name">' + esc(m.name) + '</span>' +
           (m.role === 'admin' ? '<span class="tag tag-admin">管理员</span>' : '') +
           (!m.active ? '<span class="tag tag-off">已停用</span>' : '') +
           '<div class="mc-status ' + stCls + '">' + stText + '</div>' +
+          '<div class="hp-bar"><span class="hp-label">❤ 生命值</span><div class="hp-progress"><div class="hp-fill" style="width:' + hp + '%"></div></div><span class="hp-num">' + hp + '</span></div>' +
         '</div>' +
         '<div>' + action + '</div>' +
       '</div>';
@@ -1166,9 +1225,20 @@ function confirmUnbind() {
 function enterAdmin() {
   if (isAdmin()) { state.view = 'admin'; state.adminTab = 'members'; render(); return; }
   showModal({
-    title: '无权限',
-    body: '只有管理员设备才能进入管理端。',
-    confirmText: '知道了', showCancel: false
+    title: '管理员验证',
+    body: '<label>请输入管理员密码</label><input type="password" id="adminPwd" placeholder="管理员密码" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;margin-top:8px">',
+    confirmText: '进入',
+    onConfirm: () => {
+      const pwd = document.getElementById('adminPwd').value;
+      if (pwd === '052800') {
+        // 密码正确，进入管理模式（当前设备标记为管理员临时模式）
+        sessionStorage.setItem('adminMode', '1');
+        toast('验证成功', 'success');
+        state.view = 'admin'; state.adminTab = 'members'; render();
+      } else {
+        toast('密码错误');
+      }
+    }
   });
 }
 
@@ -1405,9 +1475,45 @@ function renderAdminSettings() {
       '数据实时同步在云端，所有成员打开链接即可看到最新状态。导出备份仅用于数据备份。' +
     '</div>' +
   '</div>' +
+  '<div class="card">' +
+    '<div class="form-title">数据重置</div>' +
+    '<div class="toolbar">' +
+      '<button class="btn btn-danger" onclick="resetAllData()">⚠️ 清空所有打卡记录（次数清零）</button>' +
+    '</div>' +
+    '<div class="tip" style="margin-top:10px;color:#ff4d4f">' +
+      '此操作会删除所有打卡记录，训练次数重新从0开始计算。生命值也会重置为100。' +
+    '</div>' +
+  '</div>' +
   '<div class="card tip">' +
     '本系统使用云端数据库，所有成员共享同一份数据，打卡实时同步。' +
   '</div>';
+}
+
+function resetAllData() {
+  showModal({
+    title: '确认重置',
+    body: '确定要清空所有打卡记录吗？此操作不可恢复，所有成员的训练次数和生命值都将重新计算。',
+    confirmText: '确定重置',
+    danger: true,
+    onConfirm: async () => {
+      // 清空所有 checkins
+      for (const c of checkins) {
+        if (c.dbId) {
+          const { error } = await sb.from('checkins').delete().eq('id', c.dbId);
+          if (error) console.error('删除记录失败', error);
+        }
+      }
+      checkins.length = 0;
+      // 重置所有成员生命值为100
+      for (const m of members) {
+        m.hp = 100;
+        await syncMember(m);
+      }
+      localStorage.removeItem(KEY_CHECKINS);
+      toast('已重置', 'success');
+      render();
+    }
+  });
 }
 
 /* ---- 数据文件下载 / 导入 ---- */
