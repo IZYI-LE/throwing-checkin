@@ -309,57 +309,10 @@ async function loadFromDB() {
   await checkAndDeductHp();
 }
 
-/* 检查并扣除未打卡生命值（自动补扣历史遗漏的） */
+/* 生命值实时计算，不需要扣血操作 */
 async function checkAndDeductHp() {
-  const today = beijingDate();
-  // 获取上次扣血日期
-  let lastDate = '2020-01-01'; // 默认很早
-  const { data: config } = await sb.from('config').select('*').eq('key', 'lastHpDate').single();
-  if (config && config.value) lastDate = config.value;
-
-  // 从 lastDate 之后一天开始，扣到昨天为止
-  const datesToDeduct = [];
-  let d = new Date(lastDate + 'T00:00:00+08:00');
-  d.setDate(d.getDate() + 1);
-  const yesterday = new Date(today + 'T00:00:00+08:00');
-  yesterday.setDate(yesterday.getDate() - 1);
-  while (d <= yesterday) {
-    datesToDeduct.push(formatDate(d));
-    d.setDate(d.getDate() + 1);
-  }
-
-  if (datesToDeduct.length === 0) return; // 没有需要补扣的日期
-
-  let deductedCount = 0;
-  for (const dateStr of datesToDeduct) {
-    const dayCheckins = checkins.filter((c) => c.date === dateStr);
-    const dayMap = {};
-    dayCheckins.forEach((c) => { dayMap[c.memberId] = c; });
-
-    for (const m of members) {
-      if (!m.active) continue;
-      const rec = dayMap[m.id];
-      // 当天没来训练 或者 请假，扣10点
-      if (!rec || rec.status !== 'present') {
-        const currentHp = m.hp !== undefined ? m.hp : 100;
-        m.hp = Math.max(0, currentHp - 10);
-        await syncMember(m);
-        deductedCount++;
-      }
-    }
-  }
-
-  // 更新最后扣血日期为昨天
-  const lastDeductedDate = datesToDeduct[datesToDeduct.length - 1];
-  if (config) {
-    await sb.from('config').update({ value: lastDeductedDate }).eq('key', 'lastHpDate');
-  } else {
-    await sb.from('config').insert({ key: 'lastHpDate', value: lastDeductedDate });
-  }
-
-  if (deductedCount > 0) {
-    console.log('补扣了', datesToDeduct.length, '天的生命值，共', deductedCount, '人次');
-  }
+  // 生命值 = 100 - 累计未打卡次数 × 10，实时计算，不需要存储
+  return;
 }
 
 /* 格式化日期为 YYYY-MM-DD */
@@ -370,32 +323,34 @@ function formatDate(d) {
   return y + '-' + m + '-' + day;
 }
 
-/* 计算累计未打卡次数（总共有多少天没来训练） */
+/* 计算累计未打卡次数：从最早记录日期到昨天，总天数 - 来训练天数 */
 function getMissStreak(memberId) {
-  // 统计所有打卡记录中，不是 present 的天数（即没来训练或请假的天数）
-  const memberRecords = checkins.filter((c) => c.memberId === memberId);
-  let missDays = 0;
-  // 先数有记录但不是 present 的
-  memberRecords.forEach((c) => {
-    if (c.status !== 'present') missDays++;
-  });
-  // 再数从记录开始到现在，完全没记录的天数（补扣的也算）
-  if (memberRecords.length === 0) {
-    // 没有任何记录，从最早的记录开始算？简单点：从最近30天算
-    // 其实累计次数就是：总天数 - 来训练的天数
-    // 这里我们简化：累计未打卡 = 总应到天数 - 来训练天数
-    // 总应到天数：从第一次记录到现在的天数，或者直接用总未打卡（非present）记录数
-    // 简单方案：直接返回非present的记录数
-    return missDays;
-  }
-  return missDays;
+  if (checkins.length === 0) return 0;
+  // 找最早的打卡日期
+  let earliest = checkins[0].date;
+  checkins.forEach((c) => { if (c.date < earliest) earliest = c.date; });
+  // 从最早日期到昨天，总共有多少天
+  const start = new Date(earliest + 'T00:00:00+08:00');
+  const yesterday = new Date(beijingDate() + 'T00:00:00+08:00');
+  yesterday.setDate(yesterday.getDate() - 1);
+  const totalDays = Math.floor((yesterday - start) / (1000 * 60 * 60 * 24)) + 1;
+  if (totalDays <= 0) return 0;
+  // 该成员来训练的次数
+  const presentCount = checkins.filter((c) => c.memberId === memberId && c.status === 'present').length;
+  return Math.max(0, totalDays - presentCount);
+}
+
+/* 实时计算生命值：100 - 累计未打卡次数 × 10 */
+function getHp(memberId) {
+  const miss = getMissStreak(memberId);
+  return Math.max(0, 100 - miss * 10);
 }
 
 /* 同步新成员到 Supabase（返回生成的 id） */
 async function insertMember(m) {
   const { data, error } = await sb.from('members').insert({
     name: m.name, role: m.role, active: m.active,
-    boundBy: m.boundBy || '', hp: m.hp !== undefined ? m.hp : 100
+    boundBy: m.boundBy || ''
   }).select();
   if (error) { console.error('insertMember error', error); return null; }
   return data[0];
@@ -403,12 +358,10 @@ async function insertMember(m) {
 
 /* 更新已有成员到 Supabase */
 async function syncMember(m) {
-  const updateData = {
+  const { error } = await sb.from('members').update({
     name: m.name, role: m.role, active: m.active,
     boundBy: m.boundBy || '', updatedAt: new Date().toISOString()
-  };
-  if (m.hp !== undefined) updateData.hp = m.hp;
-  const { error } = await sb.from('members').update(updateData).eq('id', m.id);
+  }).eq('id', m.id);
   if (error) console.error('syncMember error', error);
 }
 
@@ -965,7 +918,7 @@ function renderMemberList(all) {
   list.forEach((m) => {
     const stText = m.status === 'present' ? '已来训练' : m.status === 'absent' ? '已请假' : '未打卡';
     const stCls = m.status === 'present' ? 'ok' : m.status === 'absent' ? 'warn' : 'none';
-    const hp = m.hp !== undefined ? m.hp : 100;
+    const hp = getHp(m.id);
     const hpCls = hp < 60 ? 'hp-low' : '';
     let action = '';
     if (isBoundByThisDevice(m)) action = '<span class="mc-action go">去打卡 ›</span>';
@@ -1212,7 +1165,7 @@ function renderStats() {
   // 累计未打卡排行榜
   const missList = members
     .filter((m) => m.active)
-    .map((m) => ({ name: m.name, streak: getMissStreak(m.id), hp: m.hp !== undefined ? m.hp : 100 }))
+    .map((m) => ({ name: m.name, streak: getMissStreak(m.id), hp: getHp(m.id) }))
     .filter((x) => x.streak > 0)
     .sort((a, b) => b.streak - a.streak);
   html += '<div class="section-title">累计未打卡排行榜 ⚠️</div>' +
@@ -1552,7 +1505,7 @@ function renderAdminSettings() {
 function resetAllData() {
   showModal({
     title: '确认重置',
-    body: '确定要清空所有打卡记录吗？此操作不可恢复，所有成员的训练次数和生命值都将重新计算。',
+    body: '确定要清空所有打卡记录吗？此操作不可恢复，所有成员的训练次数和生命值都将重新从100开始计算。',
     confirmText: '确定重置',
     danger: true,
     onConfirm: async () => {
@@ -1564,11 +1517,7 @@ function resetAllData() {
         }
       }
       checkins.length = 0;
-      // 重置所有成员生命值为100
-      for (const m of members) {
-        m.hp = 100;
-        await syncMember(m);
-      }
+      // 清空后生命值自动恢复100（实时计算）
       localStorage.removeItem(KEY_CHECKINS);
       toast('已重置', 'success');
       render();
