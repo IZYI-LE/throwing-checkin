@@ -1221,9 +1221,8 @@ function confirmUnbind() {
   });
 }
 
-/* 管理入口：管理员直接进；非管理员输密码 */
+/* 管理入口：都需要密码验证 */
 function enterAdmin() {
-  if (isAdmin()) { state.view = 'admin'; state.adminTab = 'members'; render(); return; }
   showModal({
     title: '管理员验证',
     body: '<label>请输入管理员密码</label><input type="password" id="adminPwd" placeholder="管理员密码" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;margin-top:8px">',
