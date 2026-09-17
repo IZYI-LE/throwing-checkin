@@ -361,18 +361,34 @@ function apiLogin() {
   return { code: 0, deviceId, isAdmin: isAdmin(), member: m ? { id: m.id, name: m.name, role: m.role, active: m.active } : null };
 }
 
+/* 多设备绑定辅助函数：boundBy 存逗号分隔的设备 ID 列表 */
+function getBoundDevices(m) {
+  return (m.boundBy || '').split(',').filter(Boolean);
+}
+function isBoundByThisDevice(m) {
+  return getBoundDevices(m).includes(deviceId);
+}
+function addDeviceToMember(m) {
+  const list = getBoundDevices(m);
+  if (!list.includes(deviceId)) list.push(deviceId);
+  m.boundBy = list.join(',');
+}
+function removeDeviceFromMember(m) {
+  const list = getBoundDevices(m).filter((d) => d !== deviceId);
+  m.boundBy = list.join(',');
+}
+
 function apiBindMember(memberId) {
   if (!memberId) return { code: 400, msg: '缺少 memberId' };
   // 1. 当前设备是否已绑定
-  const bound = members.find((m) => m.boundBy === deviceId);
+  const bound = members.find((m) => isBoundByThisDevice(m));
   if (bound) return { code: 400, msg: '当前设备已绑定「' + bound.name + '」，请先在我的页退出绑定' };
   // 2. 目标成员校验
   const m = members.find((x) => x.id === memberId);
   if (!m) return { code: 404, msg: '成员不存在' };
   if (!m.active) return { code: 400, msg: '该成员已停用，无法绑定' };
-  if (m.boundBy) return { code: 400, msg: '该姓名已被其他设备绑定' };
-  // 3. 绑定
-  m.boundBy = deviceId;
+  // 3. 绑定（允许多设备绑定同一人）
+  addDeviceToMember(m);
   m.updatedAt = Date.now();
   meId = memberId;
   localStorage.setItem(KEY_ME, meId);
@@ -383,7 +399,7 @@ function apiBindMember(memberId) {
 function apiUnbindSelf() {
   const m = myMember();
   if (!m) return { code: 400, msg: '当前未绑定' };
-  m.boundBy = '';
+  removeDeviceFromMember(m);
   m.updatedAt = Date.now();
   meId = null;
   localStorage.removeItem(KEY_ME);
@@ -423,7 +439,7 @@ function apiSubmitCheckin({ date, status, reason, memberId }) {
   const exist = checkins.find((c) => c.memberId === target.id && c.date === targetDate);
 
   if (exist) {
-    if (!isAdm && exist.boundBy !== deviceId) return { code: 403, msg: '只能修改自己的打卡记录' };
+    if (!isAdm && exist.memberId !== me.id) return { code: 403, msg: '只能修改自己的打卡记录' };
     if (!isAdm) {
       if (exist.date !== today) return { code: 403, msg: '只能修改当天的打卡记录' };
       if ((exist.modifyCount || 0) >= 1) return { code: 403, msg: '当天记录只能修改一次' };
@@ -852,8 +868,8 @@ function renderMemberList(all) {
     const stText = m.status === 'present' ? '已来训练' : m.status === 'absent' ? '已请假' : '未打卡';
     const stCls = m.status === 'present' ? 'ok' : m.status === 'absent' ? 'warn' : 'none';
     let action = '';
-    if (m.boundBy === deviceId) action = '<span class="mc-action go">去打卡 ›</span>';
-    else if (!m.boundBy) action = '<span class="mc-action bind">点击绑定</span>';
+    if (isBoundByThisDevice(m)) action = '<span class="mc-action go">去打卡 ›</span>';
+    else action = '<span class="mc-action bind">点击绑定</span>';
     html +=
       '<div class="member-card ' + (m.active ? '' : 'off') + '" onclick="openMember(\'' + m.id + '\')">' +
         '<div>' +
@@ -884,11 +900,10 @@ function openMember(id) {
   const m = members.find((x) => x.id === id);
   if (!m) return;
   if (!m.active) { toast('该成员已停用'); return; }
-  if (m.boundBy === deviceId) {
+  if (isBoundByThisDevice(m)) {
     state.memberId = id; state.view = 'member'; resetMemberForm(); render();
     return;
   }
-  if (m.boundBy) { toast('该姓名已被其他设备绑定'); return; }
   const me = myMember();
   if (me) {
     showModal({
@@ -1191,28 +1206,29 @@ function renderAdmin() {
 function setAdminTab(t) { state.adminTab = t; render(); }
 
 function renderAdminMembers() {
-  const list = apiAdminMembers('list', {});
   const me = myMember();
+  const list = members.slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   let html =
     '<div class="toolbar">' +
       '<button class="btn btn-primary" onclick="openMemberForm()">＋ 添加成员</button>' +
     '</div>' +
-    '<div class="section-title">成员管理（' + list.members.length + '）</div>';
-  if (!list.members.length) return html + '<div class="empty">暂无成员</div>';
-  list.members.forEach((m) => {
+    '<div class="section-title">成员管理（' + list.length + '）</div>';
+  if (!list.length) return html + '<div class="empty">暂无成员</div>';
+  list.forEach((m) => {
     const isSelf = m.id === me.id;
+    const boundCount = (m.boundBy || '').split(',').filter(Boolean).length;
     html +=
       '<div class="card member-item">' +
         '<div>' +
           '<span class="mc-name">' + esc(m.name) + '</span>' +
           (m.role === 'admin' ? '<span class="tag tag-admin">管理员</span>' : '') +
           (!m.active ? '<span class="tag tag-off">已停用</span>' : '') +
-          (m.boundBy ? '<span class="tag" style="background:#e6f7ec;color:#1fa755">已绑定</span>' : '<span class="tag" style="background:#fff1e6;color:#ff7a1a">未绑定</span>') +
+          (boundCount > 0 ? '<span class="tag" style="background:#e6f7ec;color:#1fa755">已绑定' + boundCount + '台</span>' : '<span class="tag" style="background:#fff1e6;color:#ff7a1a">未绑定</span>') +
         '</div>' +
         '<div class="member-ops">' +
           '<button class="op-btn" onclick="openMemberForm(\'' + m.id + '\')">编辑</button>' +
           (!isSelf ? '<button class="op-btn ' + (m.active ? 'danger' : '') + '" onclick="toggleMember(\'' + m.id + '\')">' + (m.active ? '停用' : '启用') + '</button>' : '') +
-          (m.boundBy && !isSelf ? '<button class="op-btn red" onclick="unbindMember(\'' + m.id + '\')">解绑</button>' : '') +
+          (boundCount > 0 && !isSelf ? '<button class="op-btn red" onclick="unbindMember(\'' + m.id + '\')">解绑</button>' : '') +
         '</div>' +
       '</div>';
   });
@@ -1255,8 +1271,8 @@ function toggleMember(id) {
     title: '确认操作',
     body: m.active ? '确定停用「' + esc(m.name) + '」吗？停用后该成员无法打卡。' : '确定启用「' + esc(m.name) + '」吗？',
     confirmText: '确定',
-    onConfirm: () => {
-      const r = apiAdminMembers('toggle', { id });
+    onConfirm: async () => {
+      const r = await apiAdminMembers('toggle', { id });
       toast(r.msg || (r.code === 0 ? '操作成功' : '操作失败'));
       render();
     }
@@ -1271,8 +1287,8 @@ function unbindMember(id) {
     body: '确定解绑「' + esc(m.name) + '」吗？解绑后该成员需要重新绑定才能打卡。',
     confirmText: '解绑',
     danger: true,
-    onConfirm: () => {
-      const r = apiAdminMembers('unbind', { id });
+    onConfirm: async () => {
+      const r = await apiAdminMembers('unbind', { id });
       toast(r.msg || '已解绑');
       render();
     }
